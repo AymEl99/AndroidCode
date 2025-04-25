@@ -1,808 +1,4 @@
-public class MainActivity extends AppCompatActivity implements NavigationView.OnNavigationItemSelectedListener {
-    private AdView bannerAdView;
-    private FrameLayout adContainer;
-    private InterstitialAd interstitialAd;
-    private FirebaseRemoteConfig remoteConfig;
-    private int clickCount = 0;
-    private static final int PERMISSION_REQUEST_CODE = 1001;
-    private static final String TAG = "MainActivity";
-    private static final long CACHE_EXPIRATION = 35; // in seconds
-    private boolean isOnHomePage = true; // Add this at the class level
-    // Timer for banner ads
-    private Timer bannerAdTimer;
-    // Initial delay before showing banner ad (1 minute)
-    private static final long INITIAL_BANNER_DELAY = 60000;
-    // How often to refresh the banner ad (5 minutes)
-    private static final long BANNER_REFRESH_INTERVAL = 300000;
-    // App Open Ad variables
-    private AppOpenAd appOpenAd = null;
-    private boolean isShowingAd = false;
-    private long appOpenAdLoadTime = 0;
-    private AppOpenAdManager appOpenAdManager;
-    private PowerManager.WakeLock wakeLock;
-    private ServiceConnection serviceConnection;
-    private boolean isServiceBound = false;
-    private boolean isMusicPlaying = false;
-    private String currentSong = "";
-    private boolean isFirstLoad = true;
-    private WebView webView;
-
-
-
-    /**
-     * Class to manage App Open Ads
-     */
-    private class AppOpenAdManager {
-        // In your AppOpenAdManager class
-        private static final long APP_OPEN_AD_TIMEOUT = 2 * 60 * 60 * 1000; // 2 hours
-
-        /**
-         * Load an app open ad
-         */
-        public void loadAd(String adUnitId) {
-            // Check for valid ad unit ID
-            if (TextUtils.isEmpty(adUnitId)) {
-                Log.e(TAG, "Cannot load app open ad: Empty ad unit ID");
-                return;
-            }
-            try {
-                // We want to force loading a new ad on app start
-                AppOpenAd.AppOpenAdLoadCallback loadCallback = new AppOpenAd.AppOpenAdLoadCallback() {
-                    @Override
-                    public void onAdLoaded(@NonNull AppOpenAd ad) {
-                        appOpenAd = ad;
-                        appOpenAdLoadTime = new Date().getTime();
-                        Log.d(TAG, "App Open Ad loaded successfully");
-                        // Show ad immediately when loaded
-                        showAdIfAvailable();
-                    }
-
-                    @Override
-                    public void onAdFailedToLoad(@NonNull LoadAdError loadAdError) {
-                        Log.e(TAG, "App Open Ad failed to load: " + loadAdError.getMessage());
-                    }
-                };
-                AdRequest request = new AdRequest.Builder().build();
-                AppOpenAd.load(MainActivity.this, adUnitId, request, loadCallback);
-            } catch (Exception e) {
-                Log.e(TAG, "Error loading app open ad: " + e.getMessage(), e);
-            }
-        }
-
-        /**
-         * Check if ad is available and not expired
-         */
-        public boolean isAdAvailable() {
-            return appOpenAd != null &&
-                    (new Date().getTime() - appOpenAdLoadTime < APP_OPEN_AD_TIMEOUT);
-        }
-
-        /**
-         * Show the ad if it's available
-         */
-        public void showAdIfAvailable() {
-            if (!isShowingAd && isAdAvailable()) {
-                Log.d(TAG, "Showing app open ad");
-                try {
-                    FullScreenContentCallback fullScreenContentCallback =
-                            new FullScreenContentCallback() {
-                                @Override
-                                public void onAdDismissedFullScreenContent() {
-                                    // Set the reference to null so isAdAvailable() returns false
-                                    appOpenAd = null;
-                                    isShowingAd = false;
-                                    // Load the next ad
-                                    if (remoteConfig != null) {
-                                        String adId = remoteConfig.getString("open_ad_id_meditation");
-                                        if (!TextUtils.isEmpty(adId)) {
-                                            loadAd(adId);
-                                        }
-                                    }
-                                }
-
-                                @Override
-                                public void onAdFailedToShowFullScreenContent(@NonNull AdError adError) {
-                                    Log.e(TAG, "App Open Ad failed to show: " + adError.getMessage());
-                                }
-
-                                @Override
-                                public void onAdShowedFullScreenContent() {
-                                    isShowingAd = true;
-                                }
-                            };
-                    appOpenAd.setFullScreenContentCallback(fullScreenContentCallback);
-                    appOpenAd.show(MainActivity.this);
-                } catch (Exception e) {
-                    Log.e(TAG, "Error showing app open ad: " + e.getMessage(), e);
-                    isShowingAd = false;
-                }
-            } else {
-                Log.d(TAG, "App open ad is not ready yet");
-                if (remoteConfig != null) {
-                    String adId = remoteConfig.getString("open_ad_id_meditation");
-                    if (!TextUtils.isEmpty(adId)) {
-                        loadAd(adId);
-                    }
-                }
-            }
-        }
-    }
-
-    private BroadcastReceiver screenStateReceiver = new BroadcastReceiver() {
-        @Override
-        public void onReceive(Context context, Intent intent) {
-            if (intent.getAction().equals(Intent.ACTION_SCREEN_ON)) {
-                // Screen turned ON: Ensure the media player is playing
-
-            } else {
-                intent.getAction();// Screen turned OFF: Do nothing (music should keep playing)
-            }
-        }
-    };
-
-
-    @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
-        // Set the correct theme before calling super.onCreate()
-        setTheme(R.style.AppTheme_NoActionBar); // Ensure this theme extends Theme.MaterialComponents
-        setContentView(R.layout.activity_main);
-
-        // Acquire partial wake lock so the CPU stays on
-        PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MyApp::AudioWakelock");
-        wakeLock.acquire(10 * 60 * 1000L /*10 minutes*/);
-        try {
-            // Initialize screen orientation and system UI
-            setupScreenOrientation();
-            setupSystemUI();
-            // Set the content view
-            setContentView(R.layout.activity_main);
-
-            boolean keepMusicPlaying = getIntent().getBooleanExtra("KEEP_MUSIC_PLAYING", false);
-
-            // Handle back button press
-            getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
-                @Override
-                public void handleOnBackPressed() {
-                    // Just finish this activity without any special handling
-                    finish();
-                }
-            });
-
-            // Add a back button to return to main activity
-            if (getSupportActionBar() != null) {
-                getSupportActionBar().setDisplayHomeAsUpEnabled(true);
-                getSupportActionBar().setTitle("Home"); // Set title to Home initially
-            }
-
-            // Initialize Firebase Remote Config first to avoid NullPointerExceptions later
-            initializeRemoteConfig();
-
-            // Initialize adContainer reference
-            adContainer = findViewById(R.id.adContainer);
-
-            // Set up navigation drawer and toolbar
-            setupToolbarAndDrawer();
-
-            // Initialize WebView before ads
-            setupWebView();
-
-            // Initialize MobileAds
-            initializeMobileAds();
-            // Initialize app
-            initializeApp();
-
-            // Check and request permissions
-            if (checkAndRequestPermissions()) {
-                initializeApp();
-            }
-
-        } catch (Exception e) {
-            // Log any errors during initialization
-            Log.e(TAG, "Error in onCreate: " + e.getMessage(), e);
-            Toast.makeText(this, "Error initializing app. Please restart.", Toast.LENGTH_SHORT).show();
-        }
-
-    }
-
-
-    @Override
-    protected void onNewIntent(Intent intent) {
-        super.onNewIntent(intent);
-        boolean keepMusicPlaying = intent.getBooleanExtra("KEEP_MUSIC_PLAYING", false);
-    }
-
-
-
-
-    @Override
-    public boolean onOptionsItemSelected(MenuItem item) {
-        if (item.getItemId() == android.R.id.home) {
-            // Return to main activity without stopping music
-            finish();
-            return true;
-        }
-        return super.onOptionsItemSelected(item);
-    }
-
-    private void setupScreenOrientation() {
-        try {
-            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
-        } catch (Exception e) {
-            Log.e(TAG, "Error setting screen orientation: " + e.getMessage(), e);
-        }
-    }
-
-    private void setupSystemUI() {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                getWindow().setStatusBarColor(Color.TRANSPARENT);
-                getWindow().getDecorView().setSystemUiVisibility(
-                        View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
-                                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                );
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Error setting up system UI: " + e.getMessage(), e);
-        }
-    }
-
-    private void setupToolbarAndDrawer() {
-        try {
-            Toolbar toolbar = findViewById(R.id.toolbar);
-            if (toolbar != null) {
-                setSupportActionBar(toolbar);
-            } else {
-                Log.e(TAG, "Toolbar not found in layout");
-                return;
-            }
-            DrawerLayout drawer = findViewById(R.id.drawer_layout);
-            if (drawer == null) {
-                Log.e(TAG, "DrawerLayout not found in layout");
-                return;
-            }
-            ActionBarDrawerToggle toggle = new ActionBarDrawerToggle(
-                    this, drawer, toolbar, R.string.navigation_drawer_open, R.string.navigation_drawer_close);
-            drawer.addDrawerListener(toggle);
-            toggle.syncState();
-            NavigationView navigationView = findViewById(R.id.nav_view);
-            if (navigationView == null) {
-                Log.e(TAG, "NavigationView not found in layout");
-                return;
-            }
-            navigationView.setNavigationItemSelectedListener(this);
-            // Center navigation items
-            for (int i = 0; i < navigationView.getMenu().size(); i++) {
-                MenuItem menuItem = navigationView.getMenu().getItem(i);
-                if (menuItem != null && menuItem.getItemId() != View.NO_ID) {
-                    View view = navigationView.getMenu().findItem(menuItem.getItemId()).getActionView();
-                    if (view != null) {
-                        view.setTextAlignment(View.TEXT_ALIGNMENT_CENTER);
-                    }
-                }
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Error setting up toolbar and drawer: " + e.getMessage(), e);
-        }
-    }
-
-    private boolean checkAndRequestPermissions() {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                // For Android 13+
-                boolean needsMediaAudioPermission = ContextCompat.checkSelfPermission(this,
-                        Manifest.permission.READ_MEDIA_AUDIO) != PackageManager.PERMISSION_GRANTED;
-                boolean needsMediaImagesPermission = ContextCompat.checkSelfPermission(this,
-                        Manifest.permission.READ_MEDIA_IMAGES) != PackageManager.PERMISSION_GRANTED;
-                if (needsMediaAudioPermission || needsMediaImagesPermission) {
-                    ActivityCompat.requestPermissions(this,
-                            new String[]{
-                                    Manifest.permission.READ_MEDIA_AUDIO,
-                                    Manifest.permission.READ_MEDIA_IMAGES
-                            },
-                            PERMISSION_REQUEST_CODE);
-                    return false;
-                }
-            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                // For Android 6.0 - 12
-                if (ContextCompat.checkSelfPermission(this,
-                        Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-                    ActivityCompat.requestPermissions(this,
-                            new String[]{Manifest.permission.READ_EXTERNAL_STORAGE},
-                            PERMISSION_REQUEST_CODE);
-                    return false;
-                }
-            }
-
-            return true;
-        } catch (Exception e) {
-            Log.e(TAG, "Error checking permissions: " + e.getMessage(), e);
-
-            return true;
-        }
-    }
-
-    @Override
-    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == PERMISSION_REQUEST_CODE) {
-          
-            // Initialize app regardless of permission result
-            // This prevents crashes when user denies permissions
-            initializeApp();
-        }
-    }
-
-    private void initializeApp() {
-        try {
-            // Load JSON data
-            loadJSONData();
-        } catch (Exception e) {
-            Log.e(TAG, "Error in initializeApp: " + e.getMessage(), e);
-        }
-    }
-
-    private void initializeRemoteConfig() {
-        try {
-            remoteConfig = FirebaseRemoteConfig.getInstance();
-            FirebaseRemoteConfigSettings configSettings = new FirebaseRemoteConfigSettings.Builder()
-                    .setMinimumFetchIntervalInSeconds(CACHE_EXPIRATION)
-                    .build();
-            remoteConfig.setConfigSettingsAsync(configSettings);
-            // Set default values
-            remoteConfig.setDefaultsAsync(R.xml.remote_config_defaults);
-            // Fetch remote config immediately
-            remoteConfig.fetchAndActivate()
-                    .addOnCompleteListener(task -> {
-                        if (task.isSuccessful()) {
-                            boolean updated = task.getResult();
-                            Log.d(TAG, "Config params updated: " + updated);
-                        } else {
-                            Log.e(TAG, "Remote config fetch failed");
-                        }
-                    });
-        } catch (Exception e) {
-            Log.e(TAG, "Error initializing Remote Config: " + e.getMessage(), e);
-            // Create a new instance if initialization fails
-            try {
-                remoteConfig = FirebaseRemoteConfig.getInstance();
-            } catch (Exception e2) {
-                Log.e(TAG, "Critical error initializing Remote Config: " + e2.getMessage(), e2);
-            }
-        }
-    }
-
-    private void initializeMobileAds() {
-        try {
-            MobileAds.initialize(this, initializationStatus -> {
-                Log.d(TAG, "AdMob initialized");
-                // Ensure WebView is initialized before setting up ads
-                if (webView != null) {
-                    initializeAds();
-                } else {
-                    Log.w(TAG, "WebView not initialized yet, delaying ad initialization");
-                    // Add a short delay to ensure WebView is initialized
-                    new Handler(Looper.getMainLooper()).postDelayed(this::initializeAds, 500);
-                }
-            });
-        } catch (Exception e) {
-            Log.e(TAG, "Error initializing MobileAds: " + e.getMessage(), e);
-        }
-    }
-
-    private void initializeAds() {
-        try {
-            if (remoteConfig == null) {
-                Log.e(TAG, "Remote config is null, cannot initialize ads");
-                return;
-            }
-            boolean showBannerAds = remoteConfig.getBoolean("show_banner_ads_meditation");
-            boolean showInterstitialAds = remoteConfig.getBoolean("show_interstitial_ads_meditation");
-            boolean showOpenAds = remoteConfig.getBoolean("show_open_ads_meditation");
-            String bannerAdUnitId = remoteConfig.getString("banner_ad_id_meditation");
-            String interstitialAdUnitId = remoteConfig.getString("interstitial_ad_id_meditation");
-            String openAdUnitId = remoteConfig.getString("open_ad_id_meditation");
-            // If remote config values are empty, use defaults from resources
-            if (TextUtils.isEmpty(bannerAdUnitId)) {
-                bannerAdUnitId = getString(R.string.banner_ad_unit_id_meditation);
-            }
-            if (TextUtils.isEmpty(interstitialAdUnitId)) {
-                interstitialAdUnitId = getString(R.string.interstitial_ad_unit_id_meditation);
-            }
-            if (TextUtils.isEmpty(openAdUnitId)) {
-                openAdUnitId = getString(R.string.open_app_ad_unit_id_meditation);
-            }
-            // App Open Ad Setup - Initialize first for immediate display
-            setupAppOpenAds(showOpenAds, openAdUnitId);
-            // Banner Ad Setup
-            setupBannerAd(showBannerAds, bannerAdUnitId);
-            // Interstitial Ad Setup
-            setupInterstitialAds(showInterstitialAds, interstitialAdUnitId);
-        } catch (Exception e) {
-            Log.e(TAG, "Error initializing ads: " + e.getMessage(), e);
-        }
-    }
-
-    private void setupBannerAd(boolean showBannerAds, String bannerAdUnitId) {
-        try {
-            // Find the AdView in layout
-            bannerAdView = findViewById(R.id.adView);
-            if (bannerAdView == null) {
-                Log.e(TAG, "Banner AdView not found in layout");
-                return;
-            }
-            // Set background transparent
-            bannerAdView.setBackgroundColor(Color.TRANSPARENT);
-            // Initially hide the banner and reset margins
-            bannerAdView.setVisibility(View.GONE);
-            if (adContainer != null) {
-                adContainer.setVisibility(View.GONE);
-            }
-            adjustWebViewLayout(false);
-            // If banner ads are disabled, then return early
-            if (!showBannerAds || TextUtils.isEmpty(bannerAdUnitId)) {
-                return;
-            }
-            // Set ad unit ID if not already set
-            if (TextUtils.isEmpty(bannerAdView.getAdUnitId())) {
-                bannerAdView.setAdUnitId(bannerAdUnitId);
-            }
-            // Set up listener
-            bannerAdView.setAdListener(new AdListener() {
-                @Override
-                public void onAdFailedToLoad(@NonNull LoadAdError loadAdError) {
-                    Log.e(TAG, "Banner ad failed to load: " + loadAdError.getMessage());
-                    // Hide container if ad fails to load
-                    if (adContainer != null) {
-                        adContainer.setVisibility(View.GONE);
-                    }
-                    bannerAdView.setVisibility(View.GONE);
-                    // Remove space
-                    adjustWebViewLayout(false);
-                    // Try to reload the ad after a delay
-                    new Handler(Looper.getMainLooper()).postDelayed(() -> loadBannerAd(), 30000); // try again in 30 seconds
-                }
-
-                @Override
-                public void onAdLoaded() {
-                    Log.d(TAG, "Banner ad loaded successfully");
-                    // Make sure container and ad are visible
-                    if (adContainer != null) {
-                        adContainer.setVisibility(View.VISIBLE);
-                    }
-                    bannerAdView.setVisibility(View.VISIBLE);
-                    // Add space to WebView to prevent overlap
-                    adjustWebViewLayout(true);
-                }
-            });
-            // Set up timer to show banner ad after delay and refresh periodically
-            scheduleBannerAds();
-        } catch (Exception e) {
-            Log.e(TAG, "Error setting up banner ad: " + e.getMessage(), e);
-        }
-    }
-
-    private void adjustWebViewLayout(boolean addSpace) {
-        try {
-            // Get WebView content container
-            View contentView = findViewById(R.id.content_main);
-            WebView webView = findWebViewInViewGroup(contentView);
-
-            if (contentView != null) {
-                ViewGroup.LayoutParams params = contentView.getLayoutParams();
-
-                if (params instanceof ViewGroup.MarginLayoutParams) {
-                    ViewGroup.MarginLayoutParams marginParams = (ViewGroup.MarginLayoutParams) params;
-
-                    if (addSpace) {
-                        // Get actual height of the banner
-                        int bannerHeight = 0;
-                        if (bannerAdView != null && bannerAdView.getVisibility() == View.VISIBLE) {
-                            bannerHeight = bannerAdView.getHeight();
-                            if (bannerHeight == 0) {
-                                // Fallback to standard size if height not yet measured
-                                bannerHeight = AdSize.BANNER.getHeightInPixels(this);
-                            }
-                        } else {
-                            bannerHeight = AdSize.BANNER.getHeightInPixels(this);
-                        }
-
-                        // Apply bottom margin
-                        marginParams.bottomMargin = bannerHeight;
-                    } else {
-                        // Remove margin when banner is hidden
-                        marginParams.bottomMargin = 0;
-                    }
-
-                    contentView.setLayoutParams(marginParams);
-                    contentView.requestLayout();
-
-                    // If we found a WebView, also adjust its height
-                    if (webView != null) {
-                        adjustWebViewHeight(webView, addSpace, bannerAdView);
-                    }
-                }
-            }
-
-            // Force layout update
-            if (contentView != null) {
-                contentView.invalidate();
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Error adjusting WebView layout: " + e.getMessage(), e);
-        }
-    }
-
-    private WebView findWebViewInViewGroup(View view) {
-        if (view instanceof WebView) {
-            return (WebView) view;
-        }
-
-        if (view instanceof ViewGroup) {
-            ViewGroup group = (ViewGroup) view;
-            for (int i = 0; i < group.getChildCount(); i++) {
-                WebView webView = findWebViewInViewGroup(group.getChildAt(i));
-                if (webView != null) {
-                    return webView;
-                }
-            }
-        }
-
-        return null;
-    }
-
-    private void adjustWebViewHeight(WebView webView, boolean addSpace, AdView adView) {
-        try {
-            ViewGroup.LayoutParams webViewParams = webView.getLayoutParams();
-
-            if (webViewParams != null && webViewParams.height > 0) {
-                int newHeight = webViewParams.height;
-                int bannerHeight = 0;
-
-                if (addSpace && adView != null) {
-                    bannerHeight = adView.getHeight();
-                    if (bannerHeight == 0) {
-                        bannerHeight = AdSize.BANNER.getHeightInPixels(webView.getContext());
-                    }
-
-                    // If we're using MATCH_PARENT or WRAP_CONTENT, we need a different approach
-                    if (webViewParams.height == ViewGroup.LayoutParams.MATCH_PARENT ||
-                            webViewParams.height == ViewGroup.LayoutParams.WRAP_CONTENT) {
-                        // Add JavaScript to adjust content padding
-                        String js = "document.body.style.paddingBottom = '" + bannerHeight + "px';";
-                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT) {
-                            webView.evaluateJavascript(js, null);
-                        } else {
-                            webView.loadUrl("javascript:" + js);
-                        }
-                    } else {
-                        // If it's a specific height, we can adjust it
-                        webViewParams.height = newHeight - bannerHeight;
-                        webView.setLayoutParams(webViewParams);
-                    }
-                } else {
-                    // Remove any JavaScript padding
-                    String js = "document.body.style.paddingBottom = '0px';";
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.KITKAT) {
-                        webView.evaluateJavascript(js, null);
-                    } else {
-                        webView.loadUrl("javascript:" + js);
-                    }
-
-                    // Reset height if it was modified
-                    if (webViewParams.height != ViewGroup.LayoutParams.MATCH_PARENT &&
-                            webViewParams.height != ViewGroup.LayoutParams.WRAP_CONTENT) {
-                        webViewParams.height = newHeight;
-                        webView.setLayoutParams(webViewParams);
-                    }
-                }
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Error adjusting WebView height: " + e.getMessage(), e);
-        }
-    }
-
-    private void scheduleBannerAds() {
-        try {
-            // Cancel any existing timer
-            if (bannerAdTimer != null) {
-                bannerAdTimer.cancel();
-                bannerAdTimer = null;
-            }
-            // Create new timer
-            bannerAdTimer = new Timer();
-            // Schedule first ad after initial delay
-            bannerAdTimer.schedule(new TimerTask() {
-                @Override
-                public void run() {
-                    new Handler(Looper.getMainLooper()).post(() -> {
-                        loadBannerAd();
-                        // Schedule periodic refreshes
-                        try {
-                            bannerAdTimer.scheduleAtFixedRate(new TimerTask() {
-                                @Override
-                                public void run() {
-                                    new Handler(Looper.getMainLooper()).post(() -> loadBannerAd());
-                                }
-                            }, BANNER_REFRESH_INTERVAL, BANNER_REFRESH_INTERVAL);
-                        } catch (Exception e) {
-                            Log.e(TAG, "Error scheduling banner refresh: " + e.getMessage(), e);
-                        }
-                    });
-                }
-            }, INITIAL_BANNER_DELAY);
-        } catch (Exception e) {
-            Log.e(TAG, "Error scheduling banner ads: " + e.getMessage(), e);
-        }
-    }
-
-    private void loadBannerAd() {
-        try {
-            if (bannerAdView != null) {
-                String bannerAdUnitId = "";
-                if (remoteConfig != null) {
-                    bannerAdUnitId = remoteConfig.getString("banner_ad_id_meditation");
-                }
-                if (TextUtils.isEmpty(bannerAdUnitId)) {
-                    bannerAdUnitId = getString(R.string.banner_ad_unit_id_meditation);
-                }
-                if (!TextUtils.isEmpty(bannerAdUnitId)) {
-                    // Set ad unit ID if not already set
-                    if (TextUtils.isEmpty(bannerAdView.getAdUnitId())) {
-                        bannerAdView.setAdUnitId(bannerAdUnitId);
-                    }
-                    // Load new ad
-                    AdRequest adRequest = new AdRequest.Builder().build();
-                    bannerAdView.loadAd(adRequest);
-                    Log.d(TAG, "Loading banner ad");
-                }
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Error loading banner ad: " + e.getMessage(), e);
-        }
-    }
-
-    private void setupInterstitialAds(boolean showInterstitialAds, String interstitialAdUnitId) {
-        try {
-            // Check if WebView is initialized
-            if (webView == null) {
-                Log.e(TAG, "WebView is null in setupInterstitialAds");
-                return;
-            }
-            if (!showInterstitialAds || TextUtils.isEmpty(interstitialAdUnitId)) {
-                webView.setOnTouchListener(null);
-                return;
-            }
-            webView.setOnTouchListener((v, event) -> {
-                if (event.getAction() == MotionEvent.ACTION_UP) {
-                    clickCount++;
-                    if (clickCount % 15 == 0) {
-                        showInterstitialAd();
-                    }
-                }
-                return false; // Return false to allow the event to be processed by other listeners
-            });
-            loadInterstitialAd(interstitialAdUnitId);
-        } catch (Exception e) {
-            Log.e(TAG, "Error setting up interstitial ads: " + e.getMessage(), e);
-            // Remove the touch listener if there's an error
-            if (webView != null) {
-                webView.setOnTouchListener(null);
-            }
-        }
-    }
-
-    private void setupAppOpenAds(boolean showOpenAds, String openAdUnitId) {
-        try {
-            if (!showOpenAds || TextUtils.isEmpty(openAdUnitId)) {
-                return;
-            }
-            // Initialize App Open Ad Manager
-            appOpenAdManager = new AppOpenAdManager();
-            // Load ad immediately but show after short delay
-            new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                if (appOpenAdManager != null) {
-                    appOpenAdManager.loadAd(openAdUnitId);
-                }
-            }, 3000); // 3 second delay
-        } catch (Exception e) {
-            Log.e(TAG, "Error setting up app open ads: " + e.getMessage(), e);
-        }
-    }
-
-    private void loadInterstitialAd(String adUnitId) {
-        try {
-            if (TextUtils.isEmpty(adUnitId)) {
-                Log.e(TAG, "Empty interstitial ad unit ID");
-                return;
-            }
-            AdRequest adRequest = new AdRequest.Builder().build();
-            InterstitialAd.load(this, adUnitId, adRequest,
-                    new InterstitialAdLoadCallback() {
-                        @Override
-                        public void onAdLoaded(@NonNull InterstitialAd ad) {
-                            interstitialAd = ad;
-                            setupInterstitialAdCallbacks();
-                            Log.d(TAG, "Interstitial ad loaded successfully");
-                        }
-
-                        @Override
-                        public void onAdFailedToLoad(@NonNull LoadAdError loadAdError) {
-                            Log.e(TAG, "Interstitial ad failed to load: " + loadAdError.getMessage());
-                            interstitialAd = null;
-                            // Try to reload after delay
-                            new Handler(Looper.getMainLooper()).postDelayed(() -> {
-                                if (remoteConfig != null) {
-                                    String adId = remoteConfig.getString("interstitial_ad_id_meditation");
-                                    if (TextUtils.isEmpty(adId)) {
-                                        adId = getString(R.string.interstitial_ad_unit_id_meditation);
-                                    }
-                                    loadInterstitialAd(adId);
-                                }
-                            }, 60000); // Retry after 1 minute
-                        }
-                    });
-        } catch (Exception e) {
-            Log.e(TAG, "Error loading interstitial ad: " + e.getMessage(), e);
-        }
-    }
-
-    private void setupInterstitialAdCallbacks() {
-        try {
-            if (interstitialAd == null) return;
-            interstitialAd.setFullScreenContentCallback(new FullScreenContentCallback() {
-                @Override
-                public void onAdDismissedFullScreenContent() {
-                    // Preload next ad
-                    if (remoteConfig != null) {
-                        String adId = remoteConfig.getString("interstitial_ad_id_meditation");
-                        if (TextUtils.isEmpty(adId)) {
-                            adId = getString(R.string.interstitial_ad_unit_id_meditation);
-                        }
-                        loadInterstitialAd(adId);
-                    }
-                }
-
-                @Override
-                public void onAdFailedToShowFullScreenContent(@NonNull AdError adError) {
-                    Log.e(TAG, "Ad failed to show: " + adError.getMessage());
-                    interstitialAd = null;
-                    // Reload the ad
-                    if (remoteConfig != null) {
-                        String adId = remoteConfig.getString("interstitial_ad_id_meditation");
-                        if (TextUtils.isEmpty(adId)) {
-                            adId = getString(R.string.interstitial_ad_unit_id_meditation);
-                        }
-                        loadInterstitialAd(adId);
-                    }
-                }
-            });
-        } catch (Exception e) {
-            Log.e(TAG, "Error setting up interstitial ad callbacks: " + e.getMessage(), e);
-        }
-    }
-
-    private void showInterstitialAd() {
-        try {
-            if (interstitialAd != null) {
-                interstitialAd.show(this);
-            } else {
-                // Reload the ad if it's not available
-                if (remoteConfig != null) {
-                    String interstitialAdUnitId = remoteConfig.getString("interstitial_ad_id_meditation");
-                    if (TextUtils.isEmpty(interstitialAdUnitId)) {
-                        interstitialAdUnitId = getString(R.string.interstitial_ad_unit_id_meditation);
-                    }
-                    loadInterstitialAd(interstitialAdUnitId);
-                }
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Error showing interstitial ad: " + e.getMessage(), e);
-        }
-    }
-
-    private void setupWebView() {
+ private void setupWebView() {
         try {
             webView = findViewById(R.id.webview);
             if (webView == null) {
@@ -1448,35 +644,72 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
     private void loadHomePage() {
         if (!isOnHomePage) {
             try {
-                // DON'T reload the page, just show/hide containers
+                // Save current audio state before switching
+                saveCurrentSongInfo();
+
                 webView.evaluateJavascript(
                         "javascript:(function() {" +
-                                // Show the music player container if it exists
+                                // Show the music player container
                                 "var playerContainer = document.getElementById('musicPlayerContainer');" +
                                 "if (playerContainer) {" +
                                 "   playerContainer.style.display = 'block';" +
                                 "}" +
-                                // Hide the privacy policy container if it exists
+                                // Hide the other containers
                                 "var privacyContainer = document.getElementById('privacy-policy-container');" +
                                 "if (privacyContainer) {" +
                                 "   privacyContainer.style.display = 'none';" +
                                 "}" +
-                                // Hide the about us container if it exists
                                 "var aboutUsContainer = document.getElementById('about-us-container');" +
                                 "if (aboutUsContainer) {" +
                                 "   aboutUsContainer.style.display = 'none';" +
                                 "}" +
-                                // Restore music playback if it was playing
-                                "if (localStorage.getItem('wasPlaying') === 'true') {" +
-                                "   var audio = document.querySelector('audio');" +
-                                "   if (audio && audio.paused) {" +
-                                "       audio.play();" +
-                                "       var currentTime = localStorage.getItem('currentTime');" +
-                                "       if (currentTime) {" +
-                                "           audio.currentTime = parseFloat(currentTime);" +
+
+                                // CRITICAL: Check for any existing audio elements and handle them
+                                "var audio = document.querySelector('audio');" +
+                                "if (audio) {" +
+                                "   // Store audio state before manipulating" +
+                                "   var wasPlaying = !audio.paused;" +
+                                "   var currentSrc = audio.src;" +
+                                "   var currentTime = audio.currentTime;" +
+                                "   localStorage.setItem('wasPlaying', wasPlaying ? 'true' : 'false');" +
+                                "   localStorage.setItem('currentSrc', currentSrc);" +
+                                "   localStorage.setItem('currentTime', currentTime);" +
+                                "}" +
+
+                                // Apply a safe pause to prevent overlapping audio when we return
+                                "var audioElements = document.querySelectorAll('audio');" +
+                                "if (audioElements.length > 1) {" +
+                                "   console.log('Found multiple audio elements: ' + audioElements.length);" +
+                                "   // Keep only the first audio element, pause others" +
+                                "   for (var i = 1; i < audioElements.length; i++) {" +
+                                "       audioElements[i].pause();" +
+                                "       if (audioElements[i].parentNode) {" +
+                                "           audioElements[i].parentNode.removeChild(audioElements[i]);" +
                                 "       }" +
                                 "   }" +
                                 "}" +
+
+                                // Restore the music state after a short delay
+                                "setTimeout(function() {" +
+                                "   var audio = document.querySelector('audio');" +
+                                "   if (audio && localStorage.getItem('wasPlaying') === 'true') {" +
+                                "       var savedSrc = localStorage.getItem('currentSrc');" +
+                                "       var savedTime = parseFloat(localStorage.getItem('currentTime') || '0');" +
+                                "       if (savedSrc && savedSrc !== '') {" +
+                                "           if (audio.src !== savedSrc) {" +
+                                "               audio.src = savedSrc;" +
+                                "           }" +
+                                "           audio.currentTime = savedTime;" +
+                                "           var playPromise = audio.play();" +
+                                "           if (playPromise !== undefined) {" +
+                                "               playPromise.catch(e => {" +
+                                "                   console.error('Play error:', e);" +
+                                "               });" +
+                                "           }" +
+                                "       }" +
+                                "   }" +
+                                "}, 300);" +
+
                                 "console.log('Home page displayed');" +
                                 "return true;" +
                                 "})()",
@@ -1489,12 +722,10 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
                 Log.e(TAG, "Error loading home page: " + e.getMessage(), e);
             }
         }
-        // Already on home page, do nothing to preserve music playback
     }
-
     private void loadPrivacyPolicy() {
         try {
-            isOnHomePage = false; // Set flag to indicate we're not on home page
+            isOnHomePage = false;
 
             // First check if the privacy_policy.html exists
             String privacyPolicyHtml = loadHTMLFromAssets("privacy_policy.html");
@@ -1504,15 +735,26 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
                 return;
             }
 
-            Log.d(TAG, "Loading privacy policy, content length: " + privacyPolicyHtml.length());
+            // Save current music state before loading privacy policy
+            webView.evaluateJavascript(
+                    "javascript:(function() {" +
+                            "var audio = document.querySelector('audio');" +
+                            "if (audio) {" +
+                            "   var wasPlaying = !audio.paused;" +
+                            "   localStorage.setItem('wasPlaying', wasPlaying ? 'true' : 'false');" +
+                            "   localStorage.setItem('currentSrc', audio.src);" +
+                            "   localStorage.setItem('currentTime', audio.currentTime);" +
+                            "   return {playing: wasPlaying, src: audio.src, time: audio.currentTime};" +
+                            "} else {" +
+                            "   return {playing: false};" +
+                            "}" +
+                            "})()",
+                    state -> {
+                        Log.d(TAG, "Audio state before privacy policy: " + state);
+                    }
+            );
 
-            // Save current music state
-            saveCurrentSongInfo();
-
-            // Add debug code to verify execution
-            webView.evaluateJavascript("console.log('Privacy policy loading...');", null);
-
-            // Inject the Privacy Policy content into the existing WebView with simpler code
+            // Inject the Privacy Policy content without touching the audio element
             webView.evaluateJavascript(
                     "javascript:(function() {" +
                             "console.log('Privacy policy JS executing');" +
@@ -1539,7 +781,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
                             "console.log('Setting privacy container content');" +
                             "privacyContainer.innerHTML = '" + escapeJsString(privacyPolicyHtml) + "';" +
                             "privacyContainer.style.display = 'block';" +
-                            // Hide the music player container if it exists
+                            // Hide the music player container without affecting audio playback
                             "var playerContainer = document.getElementById('musicPlayerContainer');" +
                             "if (playerContainer) {" +
                             "   playerContainer.style.display = 'none';" +
@@ -1562,7 +804,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
 
     private void loadAboutUs() {
         try {
-            isOnHomePage = false; // Set flag to indicate we're not on home page
+            isOnHomePage = false;
 
             // First check if the about_us.html exists
             String aboutUsHtml = loadHTMLFromAssets("about_us.html");
@@ -1572,15 +814,26 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
                 return;
             }
 
-            Log.d(TAG, "Loading about us, content length: " + aboutUsHtml.length());
+            // Save current music state before loading about us
+            webView.evaluateJavascript(
+                    "javascript:(function() {" +
+                            "var audio = document.querySelector('audio');" +
+                            "if (audio) {" +
+                            "   var wasPlaying = !audio.paused;" +
+                            "   localStorage.setItem('wasPlaying', wasPlaying ? 'true' : 'false');" +
+                            "   localStorage.setItem('currentSrc', audio.src);" +
+                            "   localStorage.setItem('currentTime', audio.currentTime);" +
+                            "   return {playing: wasPlaying, src: audio.src, time: audio.currentTime};" +
+                            "} else {" +
+                            "   return {playing: false};" +
+                            "}" +
+                            "})()",
+                    state -> {
+                        Log.d(TAG, "Audio state before about us: " + state);
+                    }
+            );
 
-            // Save current music state
-            saveCurrentSongInfo();
-
-            // Add debug code to verify execution
-            webView.evaluateJavascript("console.log('About Us loading...');", null);
-
-            // Inject the About Us content into the existing WebView with simpler code
+            // Inject the About Us content without touching the audio element
             webView.evaluateJavascript(
                     "javascript:(function() {" +
                             "console.log('About Us JS executing');" +
@@ -1607,7 +860,7 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
                             "console.log('Setting about us container content');" +
                             "aboutUsContainer.innerHTML = '" + escapeJsString(aboutUsHtml) + "';" +
                             "aboutUsContainer.style.display = 'block';" +
-                            // Hide the music player container if it exists
+                            // Hide the music player container without affecting audio playback
                             "var playerContainer = document.getElementById('musicPlayerContainer');" +
                             "if (playerContainer) {" +
                             "   playerContainer.style.display = 'none';" +
@@ -1628,6 +881,73 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         } catch (Exception e) {
             Log.e(TAG, "Error loading about us: " + e.getMessage(), e);
             Toast.makeText(MainActivity.this, "Error loading About Us", Toast.LENGTH_SHORT).show();
+        }
+    }
+    private void fixAudioOverlap() {
+        if (webView != null) {
+            webView.evaluateJavascript(
+                    "javascript:(function() {" +
+                            "var audioElements = document.querySelectorAll('audio');" +
+                            "console.log('Checking for audio overlap, found: ' + audioElements.length + ' elements');" +
+
+                            "if (audioElements.length > 1) {" +
+                            "   // We have multiple audio elements - this is a problem" +
+                            "   console.log('Found audio overlap! Fixing...');" +
+
+                            "   // Find the playing one (if any)" +
+                            "   var playingIndex = -1;" +
+                            "   var playingSrc = '';" +
+                            "   var playingTime = 0;" +
+
+                            "   for (var i = 0; i < audioElements.length; i++) {" +
+                            "       if (!audioElements[i].paused) {" +
+                            "           playingIndex = i;" +
+                            "           playingSrc = audioElements[i].src;" +
+                            "           playingTime = audioElements[i].currentTime;" +
+                            "           break;" +
+                            "       }" +
+                            "   }" +
+
+                            "   // If none are playing, check if one was supposed to be playing" +
+                            "   if (playingIndex === -1 && localStorage.getItem('wasPlaying') === 'true') {" +
+                            "       playingSrc = localStorage.getItem('currentSrc');" +
+                            "       playingTime = parseFloat(localStorage.getItem('currentTime') || '0');" +
+                            "   }" +
+
+                            "   // Pause all audio elements" +
+                            "   for (var i = 0; i < audioElements.length; i++) {" +
+                            "       audioElements[i].pause();" +
+                            "   }" +
+
+                            "   // Keep only the first audio element, remove others" +
+                            "   for (var i = audioElements.length - 1; i > 0; i--) {" +
+                            "       if (audioElements[i].parentNode) {" +
+                            "           audioElements[i].parentNode.removeChild(audioElements[i]);" +
+                            "       }" +
+                            "   }" +
+
+                            "   // If we had a playing audio, restore its state to the remaining audio element" +
+                            "   if (playingSrc !== '') {" +
+                            "       var remainingAudio = document.querySelector('audio');" +
+                            "       if (remainingAudio) {" +
+                            "           remainingAudio.src = playingSrc;" +
+                            "           remainingAudio.currentTime = playingTime;" +
+                            "           var playPromise = remainingAudio.play();" +
+                            "           if (playPromise !== undefined) {" +
+                            "               playPromise.catch(e => console.log('Error restoring play state: ' + e));" +
+                            "           }" +
+                            "       }" +
+                            "   }" +
+
+                            "   return {fixed: true, count: audioElements.length};" +
+                            "}" +
+
+                            "return {fixed: false, count: audioElements.length};" +
+                            "})()",
+                    result -> {
+                        Log.d(TAG, "Audio overlap check result: " + result);
+                    }
+            );
         }
     }
 
@@ -1769,6 +1089,8 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         try {
             if (webView != null) {
                 webView.onResume();
+                // Check for and fix any audio overlaps
+                fixAudioOverlap();
                 // Hide debug text when resuming
                 hideDebugText();
 
@@ -1802,8 +1124,6 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
             if (bannerAdView != null) {
                 bannerAdView.resume();
             }
-
-            // Your existing ad code here
         } catch (Exception e) {
             Log.e(TAG, "Error in onResume: " + e.getMessage(), e);
         }
@@ -1880,95 +1200,61 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
             try {
                 Log.d(TAG, "Attempting to restore player state... isMusicPlaying=" + isMusicPlaying);
 
-                // Directly use our Java-side tracking to decide what to do
-                if (isMusicPlaying && !currentSong.isEmpty()) {
-                    String restoreStateScript = "javascript:(function() { " +
-                            "console.log('Restoring music from Java state');" +
-                            "var audio = document.querySelector('audio');" +
-                            "if (!audio) {" +
-                            "   console.log('No audio element found!');" +
-                            "   return false;" +
-                            "}" +
+                // First, check for audio overlaps and fix them
+                fixAudioOverlap();
 
-                            "// Check if we have the unified player" +
-                            "if (window.unifiedPlayer) {" +
-                            "   console.log('Using unified player to restore');" +
-                            "   if (window.unifiedPlayer.getCurrentSong() !== '" + escapeJsString(currentSong) + "') {" +
-                            "       window.unifiedPlayer.loadSong('" + escapeJsString(currentSong) + "');" +
-                            "   }" +
-                            "   window.unifiedPlayer.play();" +
-                            "} else {" +
-                            "   console.log('Using direct audio element to restore');" +
-                            "   if (audio.src !== '" + escapeJsString(currentSong) + "') {" +
-                            "       audio.src = '" + escapeJsString(currentSong) + "';" +
-                            "   }" +
-                            "   var playPromise = audio.play();" +
-                            "   if (playPromise !== undefined) {" +
-                            "       playPromise.catch(e => {" +
-                            "           console.log('Error restoring playback: ' + e);" +
-                            "       });" +
-                            "   }" +
-                            "}" +
-                            "return true;" +
-                            "})()";
+                // Improved restore script - safely handles multiple elements
+                String restoreStateScript = "javascript:(function() { " +
+                        "var audio = document.querySelector('audio');" +
+                        "if (!audio) {" +
+                        "   console.log('No audio element found!');" +
+                        "   return {success: false, reason: 'no_audio'};" +
+                        "}" +
 
-                    webView.evaluateJavascript(restoreStateScript, result -> {
-                        Log.d(TAG, "Restore from Java state result: " + result);
-                    });
-                } else {
-                    // If Java state says not playing, still check WebView state as fallback
-                    webView.evaluateJavascript(
-                            "javascript:(function() { " +
-                                    "var audio = document.querySelector('audio');" +
-                                    "if (audio) {" +
-                                    "   console.log('Checking WebView state...');" +
-                                    "   var wasPlaying = localStorage.getItem('wasPlaying');" +
-                                    "   var currentTime = localStorage.getItem('currentTime');" +
-                                    "   var currentSrc = localStorage.getItem('currentSrc');" +
-                                    "   console.log('WebView says was playing: ' + wasPlaying);" +
-                                    "   if (wasPlaying === 'true' && currentSrc) {" +
-                                    "       console.log('WebView state indicates music should be playing');" +
-                                    "       if (window.unifiedPlayer) {" +
-                                    "           if (currentTime) {" +
-                                    "               window.unifiedPlayer.seekTo(parseFloat(currentTime));" +
-                                    "           }" +
-                                    "           if (window.unifiedPlayer.getCurrentSong() !== currentSrc) {" +
-                                    "               window.unifiedPlayer.loadSong(currentSrc);" +
-                                    "           }" +
-                                    "           window.unifiedPlayer.play();" +
-                                    "       } else {" +
-                                    "           if (currentTime) {" +
-                                    "               audio.currentTime = parseFloat(currentTime);" +
-                                    "           }" +
-                                    "           if (audio.src !== currentSrc) {" +
-                                    "               audio.src = currentSrc;" +
-                                    "           }" +
-                                    "           audio.play().catch(e => console.log('Play error: ' + e));" +
-                                    "       }" +
-                                    "       return {restored: true, src: currentSrc};" +
-                                    "   }" +
-                                    "}" +
-                                    "return {restored: false};" +
-                                    "})()",
-                            result -> {
-                                Log.d(TAG, "WebView state check result: " + result);
+                        // Get saved state
+                        "var wasPlaying = localStorage.getItem('wasPlaying') === 'true';" +
+                        "var savedSrc = localStorage.getItem('currentSrc');" +
+                        "var savedTime = parseFloat(localStorage.getItem('currentTime') || '0');" +
 
-                                // Update Java state based on WebView state
-                                if (result != null && result.contains("restored\":true")) {
-                                    isMusicPlaying = true;
+                        // Debug log
+                        "console.log('Restoring state: playing=' + wasPlaying + ', src=' + " +
+                        "   (savedSrc ? savedSrc.substring(0, 30) + '...' : 'none') + ', time=' + savedTime);" +
 
-                                    // Extract the src if possible
-                                    if (result.contains("src\":\"")) {
-                                        int start = result.indexOf("src\":\"") + 6;
-                                        int end = result.indexOf("\"", start);
-                                        if (end > start) {
-                                            currentSong = result.substring(start, end);
-                                        }
-                                    }
-                                }
-                            }
-                    );
-                }
+                        // If Java state indicates playing
+                        "var javaPlaying = " + isMusicPlaying + ";" +
+                        "var javaSrc = '" + escapeJsString(currentSong) + "';" +
+
+                        // Logic to determine what to do
+                        "if (javaPlaying && javaSrc) {" +
+                        "   console.log('Java says music should be playing');" +
+                        "   if (audio.src !== javaSrc) {" +
+                        "       audio.src = javaSrc;" +
+                        "   }" +
+                        "   var playPromise = audio.play();" +
+                        "   if (playPromise !== undefined) {" +
+                        "       playPromise.catch(e => console.log('Play error from Java state: ' + e));" +
+                        "   }" +
+                        "   return {success: true, source: 'java'};" +
+                        "} else if (wasPlaying && savedSrc) {" +
+                        "   console.log('Local storage says music should be playing');" +
+                        "   if (audio.src !== savedSrc) {" +
+                        "       audio.src = savedSrc;" +
+                        "   }" +
+                        "   audio.currentTime = savedTime;" +
+                        "   var playPromise = audio.play();" +
+                        "   if (playPromise !== undefined) {" +
+                        "       playPromise.catch(e => console.log('Play error from localStorage: ' + e));" +
+                        "   }" +
+                        "   return {success: true, source: 'localStorage'};" +
+                        "} else {" +
+                        "   console.log('No saved state indicates music should be playing');" +
+                        "   return {success: false, reason: 'not_playing'};" +
+                        "}" +
+                        "})()";
+
+                webView.evaluateJavascript(restoreStateScript, result -> {
+                    Log.d(TAG, "Restore player state result: " + result);
+                });
             } catch (Exception e) {
                 Log.e(TAG, "Error restoring player state: " + e.getMessage(), e);
             }
@@ -2020,5 +1306,6 @@ public class MainActivity extends AppCompatActivity implements NavigationView.On
         }
         super.onDestroy();
         unregisterReceiver(screenStateReceiver);
+
     }
 }
